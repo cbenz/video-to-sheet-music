@@ -10,6 +10,7 @@ from ..extract import (
     detect_crop,
     extract_frames_at_times,
     filter_dark_images,
+    fixup_first_frame,
     get_scene_change_times,
     parse_crop_spec,
     remove_page_number_candidates,
@@ -86,6 +87,33 @@ def build_parser(
         help=(
             "Seconds to wait after a scene change before capturing the frame (default: 0.5). "
             "Allows fades/transitions to settle before extraction."
+        ),
+    )
+    parser.add_argument(
+        "--stability-window",
+        type=int,
+        default=5,
+        help=(
+            "Number of consecutive identical frames required to confirm the end "
+            "of a fade-in transition (default: 5)."
+        ),
+    )
+    parser.add_argument(
+        "--stability-threshold",
+        type=float,
+        default=5.0,
+        help=(
+            "Max mean absolute pixel difference (0-255) between consecutive "
+            "frames to consider them identical (default: 5.0)."
+        ),
+    )
+    parser.add_argument(
+        "--sample-interval",
+        type=float,
+        default=0.5,
+        help=(
+            "Interval in seconds between stability samples after a scene change "
+            "(default: 0.5)."
         ),
     )
     parser.add_argument(
@@ -168,6 +196,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.pn_padding_px < 0:
         print("Error: --pn-padding-px must be >= 0", file=sys.stderr)
         return 2
+    if args.stability_window < 2:
+        print("Error: --stability-window must be >= 2", file=sys.stderr)
+        return 2
+    if args.stability_threshold <= 0:
+        print("Error: --stability-threshold must be > 0", file=sys.stderr)
+        return 2
+    if args.sample_interval <= 0:
+        print("Error: --sample-interval must be > 0", file=sys.stderr)
+        return 2
 
     crop: str | None = None
     if args.crop is not None:
@@ -196,7 +233,11 @@ def main(argv: list[str] | None = None) -> int:
     log(f"Input video: {args.video}")
     log(f"Output dir: {args.output_dir}")
     log(f"Scene threshold: {args.scene_threshold}")
-    log(f"Debounce: {args.debounce}s")
+    log(
+        log(
+            f"Debounce: {args.debounce}s (stability: window={args.stability_window}, threshold={args.stability_threshold:.0f}, interval={args.sample_interval}s)"
+        )
+    )
     log(f"Crop: {crop if crop else 'none'}")
 
     try:
@@ -214,6 +255,18 @@ def main(argv: list[str] | None = None) -> int:
             scene_times,
             args.debounce,
             crop,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+        )
+        fixup_first_frame(
+            args.video,
+            args.output_dir,
+            scene_times,
+            args.debounce,
+            crop,
+            sample_interval=args.sample_interval,
+            stability_window=args.stability_window,
+            stability_threshold=args.stability_threshold,
             dry_run=args.dry_run,
             verbose=args.verbose,
         )

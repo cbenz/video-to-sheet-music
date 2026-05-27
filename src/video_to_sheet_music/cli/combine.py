@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
 from ..combine import (
     A4_WIDTH_PT,
     A4_HEIGHT_PT,
-    chunk_size_for_layout,
     list_input_images,
     write_pdf,
 )
@@ -20,7 +18,8 @@ def build_parser(
 ) -> argparse.ArgumentParser:
     if parser is None:
         parser = argparse.ArgumentParser(
-            description="Combine PNG images into an A4 portrait PDF, 2 images/page by default."
+            description="Combine PNG images into an A4 portrait PDF, "
+            "packing them vertically with homogeneous margins."
         )
     parser.add_argument(
         "input",
@@ -41,21 +40,33 @@ def build_parser(
         help="Glob pattern when input is a directory (default: *.png)",
     )
     parser.add_argument(
-        "--layout",
-        choices=["1x2", "2x1", "1x1"],
-        default="1x2",
-        help="Page layout on A4 portrait (default: 1x2)",
-    )
-    parser.add_argument(
         "--side-margin-cm",
         type=float,
         default=1.0,
         help="Left and right page margin in cm (default: 1.0)",
     )
     parser.add_argument(
+        "--margin-cm",
+        type=float,
+        default=1.0,
+        help="Top/bottom margin and gap between images in cm (default: 1.0, minimum: 1.0)",
+    )
+    parser.add_argument(
+        "--title-height-cm",
+        type=float,
+        default=0.0,
+        help="Reserve blank space at top of first page for a title, in cm (default: 0)",
+    )
+    parser.add_argument(
+        "--title-text",
+        type=str,
+        default=None,
+        help="Title text to write at top of first page",
+    )
+    parser.add_argument(
         "--no-page-numbers",
         action="store_true",
-        help="Disable page number rendering in the generated PDF",
+        help="Disable page number rendering",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print commands only")
     return parser
@@ -78,16 +89,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.side_margin_cm < 0:
         print("Error: --side-margin-cm must be >= 0", file=sys.stderr)
         return 2
-    per_page = chunk_size_for_layout(args.layout)
-    page_count = math.ceil(len(images) / per_page)
+    if args.margin_cm < 1.0:
+        print("Error: --margin-cm must be >= 1.0", file=sys.stderr)
+        return 2
+    if args.title_height_cm < 0:
+        print("Error: --title-height-cm must be >= 0", file=sys.stderr)
+        return 2
 
     log(f"Input images: {len(images)}")
-    log(f"Layout: {args.layout} ({per_page} image(s)/page)")
     log(f"Page size: {A4_WIDTH_PT:.1f}x{A4_HEIGHT_PT:.1f}pt (A4)")
     log(f"Side margin: {args.side_margin_cm} cm")
+    log(f"Margin (top/bottom/gap): {args.margin_cm} cm")
+    if args.title_height_cm > 0:
+        log(f"Title height: {args.title_height_cm} cm")
+    if args.title_text:
+        log(f"Title text: {args.title_text}")
     log(f"Page numbers: {'off' if args.no_page_numbers else 'on'}")
-    log(f"Expected pages: {page_count}")
-    log("PDF engine: reportlab")
 
     try:
         if args.dry_run:
@@ -96,8 +113,10 @@ def main(argv: list[str] | None = None) -> int:
             write_pdf(
                 images,
                 args.output,
-                args.layout,
                 args.side_margin_cm,
+                args.margin_cm,
+                args.title_height_cm,
+                args.title_text,
                 not args.no_page_numbers,
             )
     except Exception as exc:
@@ -107,9 +126,9 @@ def main(argv: list[str] | None = None) -> int:
     log("")
     log("Summary")
     log(f"- Images in: {len(images)}")
-    log(f"- PDF pages: {page_count}")
-    log(f"- Output PDF: {args.output}")
-    log("- Engine used: reportlab")
+    log(f"- Output: {args.output}")
+    log("- Format: pdf")
+    log("- Engine: reportlab")
 
     return 0
 

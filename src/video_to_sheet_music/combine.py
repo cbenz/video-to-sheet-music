@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import re
 from pathlib import Path
 
@@ -8,12 +7,10 @@ from reportlab.lib.pagesizes import A4, portrait
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from .utils import log
-
 A4_WIDTH_PT, A4_HEIGHT_PT = portrait(A4)
-TOP_MARGIN_CM = 1.0
-SINGLE_IMAGE_TOP_MARGIN_CM = 2.0
 PAGE_NUMBER_BOTTOM_CM = 0.6
+TITLE_FONT_SIZE_PT = 18
+TITLE_FONT = "Helvetica-Bold"
 
 
 def list_input_images(input_path: Path, pattern: str) -> list[Path]:
@@ -40,137 +37,169 @@ def get_image_size_pixels(path: Path) -> tuple[int, int]:
     return ImageReader(str(path)).getSize()
 
 
-def fit_size(
-    src_w: float, src_h: float, max_w: float, max_h: float
-) -> tuple[float, float]:
-    scale = min(max_w / src_w, max_h / src_h)
-    return src_w * scale, src_h * scale
+def _draw_image(
+    pdf: canvas.Canvas,
+    image_path: Path,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+) -> None:
+    pdf.drawImage(  # pyright: ignore[reportUnknownMemberType, reportUnusedCallResult]
+        str(image_path),
+        x,
+        y,
+        width=width,
+        height=height,
+        preserveAspectRatio=False,
+        mask="auto",
+    )
 
 
-def chunk_size_for_layout(layout: str) -> int:
-    if layout in {"1x2", "2x1"}:
-        return 2
-    return 1
+def _pack_pages(
+    images: list[Path],
+    content_w: float,
+    page_h: float,
+    margin_pt: float,
+    title_height_pt: float,
+) -> list[list[Path]]:
+    """Pack images into pages. Margin applies to top, bottom and between images."""
+    pages: list[list[Path]] = []
+    current_page: list[Path] = []
+    available_h = page_h - 2 * margin_pt
+
+    for img_path in images:
+        w_px, h_px = get_image_size_pixels(img_path)
+        img_h = content_w * h_px / w_px if w_px > 0 else 0
+
+        first_page_reserved = title_height_pt if len(pages) == 0 else 0
+        usable_h = available_h - first_page_reserved
+
+        n_in_page = len(current_page)
+        needed = img_h + (margin_pt if n_in_page > 0 else 0)
+
+        if (
+            n_in_page == 0
+            or _cumulative_height(current_page, content_w, margin_pt) + needed
+            <= usable_h
+        ):
+            current_page.append(img_path)
+        else:
+            if current_page:
+                pages.append(current_page)
+            current_page = [img_path]
+
+    if current_page:
+        pages.append(current_page)
+
+    return pages
+
+
+def _cumulative_height(images: list[Path], content_w: float, gap_pt: float) -> float:
+    """Total height of images (scaled to content_w) plus gaps between them."""
+    if not images:
+        return 0.0
+    total = 0.0
+    for p in images:
+        w_px, h_px = get_image_size_pixels(p)
+        total += content_w * h_px / w_px if w_px > 0 else 0
+    total += gap_pt * (len(images) - 1)
+    return total
 
 
 def write_pdf(
     images: list[Path],
     output_pdf: Path,
-    layout: str,
     side_margin_cm: float,
+    margin_cm: float,
+    title_height_cm: float,
+    title_text: str | None,
     add_page_numbers: bool,
 ) -> None:
+    """Generate an A4 portrait PDF, packing images vertically."""
     page_w, page_h = A4_WIDTH_PT, A4_HEIGHT_PT
     side_margin_pt = cm_to_pt(side_margin_cm)
-    top_margin_pt = cm_to_pt(TOP_MARGIN_CM)
-    single_image_top_margin_pt = cm_to_pt(SINGLE_IMAGE_TOP_MARGIN_CM)
+    margin_pt = cm_to_pt(margin_cm)
+    title_height_pt = cm_to_pt(title_height_cm)
+    if title_text:
+        title_height_pt = max(title_height_pt, cm_to_pt(1.0))
     content_w = max(1.0, page_w - (2 * side_margin_pt))
-    per_page = chunk_size_for_layout(layout)
     output_pdf.parent.mkdir(parents=True, exist_ok=True)
     pdf = canvas.Canvas(str(output_pdf), pagesize=(page_w, page_h), pageCompression=1)
 
     try:
-        for idx in range(0, len(images), per_page):
-            batch = images[idx : idx + per_page]
-            page_num = (idx // per_page) + 1
-
-            if layout == "1x2":
-                if len(batch) == 2:
-                    w1_px, h1_px = get_image_size_pixels(batch[0])
-                    w2_px, h2_px = get_image_size_pixels(batch[1])
-                    h1 = content_w * h1_px / w1_px
-                    h2 = content_w * h2_px / w2_px
-                    gap = max(top_margin_pt, (page_h - h1 - h2) / 3.0)
-                    pdf.drawImage(
-                        str(batch[0]),
-                        side_margin_pt,
-                        page_h - gap - h1,
-                        width=content_w,
-                        height=h1,
-                        preserveAspectRatio=False,
-                        mask="auto",
-                    )
-                    pdf.drawImage(
-                        str(batch[1]),
-                        side_margin_pt,
-                        gap,
-                        width=content_w,
-                        height=h2,
-                        preserveAspectRatio=False,
-                        mask="auto",
-                    )
-                else:
-                    w_px, h_px = get_image_size_pixels(batch[0])
-                    height = content_w * h_px / w_px
-                    y = page_h - single_image_top_margin_pt - height
-                    pdf.drawImage(
-                        str(batch[0]),
-                        side_margin_pt,
-                        y,
-                        width=content_w,
-                        height=height,
-                        preserveAspectRatio=False,
-                        mask="auto",
-                    )
-            elif layout == "2x1":
-                slot_w = content_w / 2.0
-                if len(batch) == 2:
-                    w1_px, h1_px = get_image_size_pixels(batch[0])
-                    w2_px, h2_px = get_image_size_pixels(batch[1])
-                    w1, h1 = fit_size(w1_px, h1_px, slot_w, page_h)
-                    w2, h2 = fit_size(w2_px, h2_px, slot_w, page_h)
-                    gap = max(0.0, (content_w - w1 - w2) / 3.0)
-                    pdf.drawImage(
-                        str(batch[0]),
-                        side_margin_pt + gap,
-                        (page_h - h1) / 2.0,
-                        width=w1,
-                        height=h1,
-                        preserveAspectRatio=False,
-                        mask="auto",
-                    )
-                    pdf.drawImage(
-                        str(batch[1]),
-                        side_margin_pt + (2.0 * gap) + w1,
-                        (page_h - h2) / 2.0,
-                        width=w2,
-                        height=h2,
-                        preserveAspectRatio=False,
-                        mask="auto",
-                    )
-                else:
-                    w_px, h_px = get_image_size_pixels(batch[0])
-                    width, height = fit_size(w_px, h_px, content_w, page_h)
-                    pdf.drawImage(
-                        str(batch[0]),
-                        side_margin_pt + (content_w - width) / 2.0,
-                        (page_h - height) / 2.0,
-                        width=width,
-                        height=height,
-                        preserveAspectRatio=False,
-                        mask="auto",
-                    )
-            else:
-                w_px, h_px = get_image_size_pixels(batch[0])
-                width, height = fit_size(w_px, h_px, content_w, page_h)
-                pdf.drawImage(
-                    str(batch[0]),
-                    side_margin_pt + (content_w - width) / 2.0,
-                    (page_h - height) / 2.0,
-                    width=width,
-                    height=height,
-                    preserveAspectRatio=False,
-                    mask="auto",
-                )
-
-            if add_page_numbers:
-                pdf.setFont("Helvetica", 10)
-                pdf.drawCentredString(
-                    page_w / 2.0,
-                    cm_to_pt(PAGE_NUMBER_BOTTOM_CM),
-                    str(page_num),
-                )
-
+        pages = _pack_pages(
+            images,
+            content_w,
+            page_h,
+            margin_pt,
+            title_height_pt,
+        )
+        for page_idx, page_images in enumerate(pages):
+            page_num = page_idx + 1
+            _draw_pdf_page(
+                pdf,
+                page_images,
+                page_w,
+                page_h,
+                content_w,
+                margin_pt,
+                side_margin_pt,
+                title_height_pt if page_idx == 0 else 0,
+                title_text if page_idx == 0 else None,
+                add_page_numbers,
+                page_num,
+            )
             pdf.showPage()
     finally:
         pdf.save()
+
+
+def _draw_pdf_page(
+    pdf: canvas.Canvas,
+    images: list[Path],
+    page_w: float,
+    page_h: float,
+    content_w: float,
+    margin_pt: float,
+    side_margin_pt: float,
+    title_height_pt: float,
+    title_text: str | None,
+    add_page_numbers: bool,
+    page_num: int,
+) -> None:
+    """Draw a single page with images stacked vertically."""
+    available_h = page_h - 2 * margin_pt - title_height_pt
+
+    heights: list[float] = []
+    total_h = 0.0
+    for p in images:
+        w_px, h_px = get_image_size_pixels(p)
+        h = content_w * h_px / w_px if w_px > 0 else 0
+        heights.append(h)
+        total_h += h
+    total_h += margin_pt * (len(images) - 1)
+
+    # Center the block vertically in available space
+    y_start = margin_pt + title_height_pt + (available_h - total_h) / 2.0
+
+    # Title
+    if title_text:
+        pdf.setFont(TITLE_FONT, TITLE_FONT_SIZE_PT)
+        title_y = page_h - margin_pt - TITLE_FONT_SIZE_PT
+        pdf.drawCentredString(page_w / 2.0, title_y, title_text)
+
+    # Draw images from top to bottom (PDF y=0 is bottom)
+    y = page_h - y_start
+    for i, p in enumerate(images):
+        y -= heights[i]
+        _draw_image(pdf, p, side_margin_pt, y, content_w, heights[i])
+        y -= margin_pt
+
+    if add_page_numbers:
+        pdf.setFont("Helvetica", 10)
+        pdf.drawCentredString(
+            page_w / 2.0,
+            cm_to_pt(PAGE_NUMBER_BOTTOM_CM),
+            str(page_num),
+        )

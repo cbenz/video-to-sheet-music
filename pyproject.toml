@@ -1,10 +1,14 @@
 [project]
 name = "video-to-sheet-music"
 version = "0.1.0"
-description = "Convert a slideshow video into a printable A4 PDF"
+description = "Convert a slideshow video with sheet music into a PDF"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["reportlab>=4.5.1"]
+dependencies = [
+    "numpy>=2.0",       #
+    "pillow>=11.0",
+    "reportlab>=4.5.1",
+]
 
 [project.scripts]
 video-to-sheet-music = "video_to_sheet_music.cli.main:main"

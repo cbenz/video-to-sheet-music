@@ -137,6 +137,146 @@ def extract_frames_at_times(
     return extracted if not dry_run else len(scene_times)
 
 
+def fixup_first_frame(
+    video: Path,
+    output_dir: Path,
+    scene_times: list[float],
+    debounce_secs: float,
+    crop: str | None,
+    *,
+    sample_interval: float = 0.5,
+    stability_window: int = 5,
+    stability_threshold: float = 5.0,
+    dry_run: bool,
+    verbose: bool,
+) -> bool:
+    """Re-extract the first frame using stability detection.
+
+    After the first scene change, we sample frames at regular intervals.
+    As soon as we find *stability_window* consecutive frames that are nearly
+    identical (mean absolute difference < *stability_threshold* / 255), the
+    transition is over — we keep the first frame of that stable window.
+
+    This is robust regardless of fade direction (white→image, black→image,
+    crossfade) and doesn't depend on absolute brightness.
+    """
+    first_path = output_dir / "frame_0001.png"
+    if dry_run or not first_path.exists():
+        return False
+
+    import shutil
+    import tempfile
+
+    import numpy as np
+    from PIL import Image
+
+    t0 = scene_times[0]
+    # Never sample past the second scene change (minus one interval)
+    max_time = scene_times[1] - sample_interval if len(scene_times) >= 2 else t0 + 30.0
+
+    filters: list[str] = []
+    if crop:
+        filters.append(f"crop={crop}")
+
+    tmp_dir = Path(tempfile.mkdtemp(dir=output_dir))
+    candidates: list[Path] = []
+    stable_start: int | None = None
+    offset = debounce_secs
+
+    try:
+        while t0 + offset < max_time:
+            target = t0 + offset
+            cand = tmp_dir / f"_stab_{len(candidates):04d}.png"
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-y",
+                "-ss",
+                f"{target:.3f}",
+                "-i",
+                str(video),
+                "-frames:v",
+                "1",
+            ]
+            if filters:
+                cmd += ["-vf", ",".join(filters)]
+            cmd.append(str(cand))
+            run_command(cmd, dry_run=dry_run, verbose=False)
+            candidates.append(cand)
+
+            # Compare with previous frame (downsampled for speed)
+            if len(candidates) >= 2:
+                a_path = candidates[-2]
+                b_path = candidates[-1]
+                img_a = Image.open(a_path).convert("L")
+                img_b = Image.open(b_path).convert("L")
+                w, h = img_a.size
+                scale = 160.0 / max(w, h)
+                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                arr_a = np.array(
+                    img_a.resize(new_size, Image.LANCZOS), dtype=np.float64
+                )
+                arr_b = np.array(
+                    img_b.resize(new_size, Image.LANCZOS), dtype=np.float64
+                )
+                diff = float(np.mean(np.abs(arr_a - arr_b)))
+
+                if diff >= stability_threshold:
+                    # Frame changed → reset stable window to start at current frame
+                    stable_start = len(candidates) - 1
+                    if verbose:
+                        log(
+                            f"  stability check at +{offset:.1f}s: "
+                            f"diff={diff:.1f} → reset"
+                        )
+                else:
+                    if verbose:
+                        log(f"  stability check at +{offset:.1f}s: diff={diff:.1f} ✓")
+                    if stable_start is None:
+                        stable_start = len(candidates) - 2
+
+                    window_len = len(candidates) - stable_start
+                    if window_len >= stability_window:
+                        chosen = candidates[stable_start]
+                        actual_offset = debounce_secs + stable_start * sample_interval
+                        log(
+                            f"First frame stable at +{actual_offset:.1f}s "
+                            f"(window of {window_len} identical frames)"
+                        )
+                        shutil.copy2(chosen, first_path)
+                        return True
+
+            offset += sample_interval
+
+        # Fallback: stability window not found → use midpoint
+        if len(scene_times) >= 2:
+            target = (scene_times[0] + scene_times[1]) / 2.0
+        else:
+            target = scene_times[0] + debounce_secs * 8.0
+        log(
+            f"Stability window not found before next scene, "
+            f"falling back to midpoint ({target:.2f}s)"
+        )
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-y",
+            "-ss",
+            f"{target:.3f}",
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+        ]
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
+        cmd.append(str(first_path))
+        run_command(cmd, dry_run=dry_run, verbose=verbose)
+        return True
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def trim_image(
     path: Path, fuzz: str, min_retained_area: float, *, dry_run: bool, verbose: bool
 ) -> bool:

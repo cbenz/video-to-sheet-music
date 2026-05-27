@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from . import combine as combine_cli
+from . import crop_sheet as crop_sheet_cli
 from . import extract as extract_cli
 
 
@@ -29,6 +30,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     combine_cli.build_parser(combine_parser)
 
+    crop_sheet_parser = sub.add_parser(
+        "crop-sheet",
+        help="Detect and crop sheet-music region in split-screen frames",
+    )
+    crop_sheet_cli.build_parser(crop_sheet_parser)
+
     args, remaining = parser.parse_known_args(argv)
 
     if remaining:
@@ -41,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
         return extract_cli.main(sub_argv)
     elif args.command == "combine-images":
         return combine_cli.main(sub_argv)
+    elif args.command == "crop-sheet":
+        return crop_sheet_cli.main(sub_argv)
     else:
         parser.print_help()
         return 1
